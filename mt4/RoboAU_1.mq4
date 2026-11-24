@@ -1,5 +1,5 @@
 #property strict
-#property version "0.20"
+#property version "0.30"
 #property description "RoboAU 1 analytical development build; no order execution"
 input bool AllowLiveTrading=false;
 
@@ -145,6 +145,58 @@ bool Confirm(const Bar &b[],Setup &s)
    s.confirmation=b[i].time;
    return true;
 }
+// Pure planning functions. No broker dispatch in this increment.
+struct TradePlan
+{
+   double entry,stop,target,lots,riskMoney;
+};
+bool BuildPlan(const int dir,const double entry,const double rawStop,
+               const double tickSize,const double tickValue,
+               const double minLot,const double maxLot,const double lotStep,
+               const double budget,const double extraCostPerLot,
+               TradePlan &p)
+{
+   if((dir!=1 && dir!=-1) || !MathIsValidNumber(entry) ||
+      !MathIsValidNumber(rawStop) || !MathIsValidNumber(tickSize) ||
+      !MathIsValidNumber(tickValue) || !MathIsValidNumber(minLot) ||
+      !MathIsValidNumber(maxLot) || !MathIsValidNumber(lotStep) ||
+      !MathIsValidNumber(budget) || !MathIsValidNumber(extraCostPerLot) ||
+      entry<=0 || rawStop<=0 || tickSize<=0 || tickValue<=0 ||
+      minLot<=0 || maxLot<minLot || lotStep<=0 || budget<=0 || extraCostPerLot<0)
+      return false;
+   // Round the structural stop away from entry, never toward it.
+   double stop=(dir==1?MathFloor(rawStop/tickSize):MathCeil(rawStop/tickSize))*tickSize;
+   double distance=dir*(entry-stop);
+   if(distance<=0 || stop<=0) return false;
+   double target=entry+dir*3.0*distance;
+   if(target<=0 || !MathIsValidNumber(target)) return false;
+   double lossPerLot=distance/tickSize*tickValue+extraCostPerLot;
+   if(lossPerLot<=0 || !MathIsValidNumber(lossPerLot)) return false;
+   double cap=MathMin(maxLot,budget/lossPerLot);
+   if(cap<minLot) return false;
+   double lots=NormalizeDouble(MathFloor(cap/lotStep)*lotStep,8);
+   if(lots*lossPerLot>budget || lots>maxLot)
+      lots=NormalizeDouble(lots-lotStep,8);
+   if(lots<minLot || lots*lossPerLot>budget || lots>maxLot) return false;
+   p.entry=entry;p.stop=stop;p.target=target;p.lots=lots;
+   p.riskMoney=lots*lossPerLot;
+   return true;
+}
+double AvailableBudget(const double equity,const double dayBase,
+                       const double realizedLoss,const double openRisk)
+{
+   if(!MathIsValidNumber(equity)||!MathIsValidNumber(dayBase)||
+      !MathIsValidNumber(realizedLoss)||!MathIsValidNumber(openRisk)||
+      equity<=0 || dayBase<=0 || realizedLoss<0 || openRisk<0) return 0;
+   return MathMax(0.0,MathMin(0.02*equity,
+             MathMin(0.05*dayBase-realizedLoss-openRisk,0.10*equity-openRisk)));
+}
+bool AccountModeAllowed()
+{
+   long mode=AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   if(mode==ACCOUNT_TRADE_MODE_DEMO) return true;
+   return mode==ACCOUNT_TRADE_MODE_REAL && AllowLiveTrading;
+}
 datetime lastBar=0;
 string lastSetup="";
 int OnInit()
@@ -172,5 +224,8 @@ void OnTick()
    if(key==lastSetup) return;
    lastSetup=key;
    Print("CANDIDATE_ONLY ",key," confirmation=",TimeToString(s.confirmation),
-         " SL=",DoubleToString(s.stop,Digits));
+         " SL=",DoubleToString(s.stop,Digits),
+         " mode_allowed=",AccountModeAllowed());
+   // Planning remains isolated until account-day loss and open-risk inputs
+   // are independently validated. No order is sent.
 }

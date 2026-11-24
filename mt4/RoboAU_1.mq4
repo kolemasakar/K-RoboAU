@@ -1,5 +1,5 @@
 #property strict
-#property version "0.30"
+#property version "0.40"
 #property description "RoboAU 1 analytical development build; no order execution"
 input bool AllowLiveTrading=false;
 
@@ -199,6 +199,36 @@ bool AccountModeAllowed()
 }
 datetime lastBar=0;
 string lastSetup="";
+// A separate, exclusive journal per account/server/symbol.
+// No FILE_SHARE_WRITE: simultaneous instances fail closed.
+string JournalName()
+{
+   string server=AccountServer();
+   StringReplace(server,"/","_"); StringReplace(server,"\\","_");
+   StringReplace(server,":","_"); StringReplace(server,"*","_");
+   StringReplace(server,"?","_"); StringReplace(server,"|","_");
+   StringReplace(server,"\"","_"); StringReplace(server,"<","_");
+   StringReplace(server,">","_");
+   return "RoboAU1_"+server+"_"+IntegerToString(AccountNumber())+
+          "_"+Symbol()+(IsTesting()?"_tester":"_terminal")+".csv";
+}
+bool ReserveSignal(const string key,const Setup &s)
+{
+   int f=FileOpen(JournalName(),FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(f==INVALID_HANDLE){Print("JOURNAL_OPEN_FAILED ",GetLastError());return false;}
+   while(!FileIsEnding(f))
+   {
+      string seen=FileReadString(f);
+      while(!FileIsLineEnding(f) && !FileIsEnding(f)) FileReadString(f);
+      if(seen==key){FileClose(f);return false;}
+   }
+   if(!FileSeek(f,0,SEEK_END)){FileClose(f);return false;}
+   uint written=FileWrite(f,key,"CANDIDATE",TimeToString(s.confirmation,TIME_DATE|TIME_SECONDS),
+                          DoubleToString(s.stop,Digits));
+   FileFlush(f);
+   FileClose(f);
+   return written>0;
+}
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
@@ -222,6 +252,7 @@ void OnTick()
    string key=Symbol()+"|"+IntegerToString(dir)+"|"+IntegerToString((long)s.breakout)
       +"|"+IntegerToString((long)s.retest)+"|"+IntegerToString((long)s.continuation);
    if(key==lastSetup) return;
+   if(!ReserveSignal(key,s)) return;
    lastSetup=key;
    Print("CANDIDATE_ONLY ",key," confirmation=",TimeToString(s.confirmation),
          " SL=",DoubleToString(s.stop,Digits),

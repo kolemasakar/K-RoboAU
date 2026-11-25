@@ -1,2 +1,3 @@
 # Operations
-Development build only. No order dispatch. Future validated EA: XAUUSD M5, DEMO initially, AllowLiveTrading=false by default. Owner controls LIVE permission. No runtime changes authorized by repository initialization.
+
+Development build: XAUUSD M5 only. EnableTrading=false and AllowLiveTrading=false by default. Terminal order dispatch remains source-locked pending acceptance. Tester execution requires explicit enable. One instance per account/server/symbol. Uncertain broker submissions retain a recovery marker; do not remove it without reconciliation. Configure estimated round-trip costs before planning. Apply 2% per-trade and 10% aggregate limits; apply 5% daily limit when today's data are available, otherwise log DAILY_RISK_UNAVAILABLE. No full-history audit. Closed-trade results and metrics cover loaded history only. Do not publish account identifiers or private logs. Historical parity and separate DEMO launch approval remain required.

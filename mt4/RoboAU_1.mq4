@@ -1,6 +1,6 @@
 #property strict
-#property version "0.40"
-#property description "RoboAU 1 analytical development build; no order execution"
+#property version "0.50"
+#property description "RoboAU 1 risk integration; execution disabled"
 input bool AllowLiveTrading=false;
 
 bool EmaPair(const double &closes[], const int period, const int lookback,
@@ -229,6 +229,75 @@ bool ReserveSignal(const string key,const Setup &s)
    FileClose(f);
    return written>0;
 }
+// Read-only account snapshot. Day base is reconstructed from loaded history;
+// incomplete history or cash adjustments cannot establish an accepted baseline.
+bool ReadAccountRisk(double &balance,double &equity,double &margin,
+                     double &dayBase,double &loss,double &openRisk)
+{
+   balance=AccountBalance(); equity=AccountEquity(); margin=AccountFreeMargin();
+   dayBase=balance; loss=0; openRisk=0;
+   datetime today=StringToTime(TimeToString(TimeCurrent(),TIME_DATE));
+   if(today<=0 || balance<=0 || equity<=0 || margin<=0) return false;
+   bool prior=false;
+   for(int i=0;i<OrdersHistoryTotal();i++)
+   {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_HISTORY)) return false;
+      if(OrderCloseTime()<today){prior=true;continue;}
+      int type=OrderType();
+      if(type!=OP_BUY && type!=OP_SELL)
+      {
+         if(type>OP_SELLSTOP) return false;
+         continue;
+      }
+      double net=OrderProfit()+OrderSwap()+OrderCommission();
+      if(!MathIsValidNumber(net)) return false;
+      dayBase-=net;
+      loss+=MathMax(0.0,-net);
+   }
+   // Conservative: refuse if loaded history does not extend before today.
+   if(!prior || dayBase<=0) return false;
+   for(int j=0;j<OrdersTotal();j++)
+   {
+      if(!OrderSelect(j,SELECT_BY_POS,MODE_TRADES)) return false;
+      int type=OrderType();
+      if(type!=OP_BUY && type!=OP_SELL) return false;
+      string sym=OrderSymbol();
+      double ts=MarketInfo(sym,MODE_TICKSIZE),tv=MarketInfo(sym,MODE_TICKVALUE);
+      double mark=MarketInfo(sym,type==OP_BUY?MODE_BID:MODE_ASK);
+      double stop=OrderStopLoss();
+      if(ts<=0 || tv<=0 || mark<=0 || stop<=0 || OrderLots()<=0) return false;
+      double distance=(type==OP_BUY?mark-stop:stop-mark);
+      if(distance<=0) return false;
+      openRisk+=distance/ts*tv*OrderLots();
+   }
+   return MathIsValidNumber(openRisk);
+}
+input double EstimatedRoundTripCostPerLot=-1.0;
+bool BrokerPlan(const Setup &s,TradePlan &p,string &reason)
+{
+   if(!AccountModeAllowed()){reason="ACCOUNT_MODE";return false;}
+   if(EstimatedRoundTripCostPerLot<0){reason="COST_NOT_CONFIGURED";return false;}
+   double bal,eq,margin,base,loss,risk;
+   if(!ReadAccountRisk(bal,eq,margin,base,loss,risk))
+   {reason="ACCOUNT_RISK_UNVERIFIED";return false;}
+   double budget=AvailableBudget(eq,base,loss,risk);
+   RefreshRates();
+   double entry=(s.direction==1?Ask:Bid);
+   double ts=MarketInfo(Symbol(),MODE_TICKSIZE),tv=MarketInfo(Symbol(),MODE_TICKVALUE);
+   if(!BuildPlan(s.direction,entry,s.stop,ts,tv,
+      MarketInfo(Symbol(),MODE_MINLOT),MarketInfo(Symbol(),MODE_MAXLOT),
+      MarketInfo(Symbol(),MODE_LOTSTEP),budget,EstimatedRoundTripCostPerLot,p))
+   {reason="PLAN_REJECTED";return false;}
+   double minDistance=MarketInfo(Symbol(),MODE_STOPLEVEL)*Point;
+   double mark=(s.direction==1?Bid:Ask);
+   if(s.direction*(mark-p.stop)<=minDistance ||
+      s.direction*(p.target-mark)<=minDistance)
+   {reason="BROKER_STOP_DISTANCE";return false;}
+   ResetLastError();
+   double remaining=AccountFreeMarginCheck(Symbol(),s.direction==1?OP_BUY:OP_SELL,p.lots);
+   if(remaining<=0 || GetLastError()!=0){reason="MARGIN";return false;}
+   reason="PLAN_ONLY";return true;
+}
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
@@ -257,6 +326,12 @@ void OnTick()
    Print("CANDIDATE_ONLY ",key," confirmation=",TimeToString(s.confirmation),
          " SL=",DoubleToString(s.stop,Digits),
          " mode_allowed=",AccountModeAllowed());
-   // Planning remains isolated until account-day loss and open-risk inputs
-   // are independently validated. No order is sent.
+   TradePlan p;
+   string reason="";
+   if(BrokerPlan(s,p,reason))
+      Print("PLAN_ONLY ",key," lots=",DoubleToString(p.lots,8),
+            " entry=",p.entry," SL=",p.stop," TP=",p.target," risk=",p.riskMoney);
+   else Print("PLAN_REJECTED ",key," reason=",reason);
+   // Dispatch remains disabled until history coverage, cost and recovery
+   // acceptance are established. No broker mutation here.
 }

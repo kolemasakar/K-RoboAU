@@ -1,5 +1,5 @@
 #property strict
-#property version "0.80"
+#property version "0.90"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -334,6 +334,43 @@ void EventLog(const string key,const string status,const string detail)
       FileWrite(f,TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),key,status,detail);
    FileFlush(f);FileClose(f);
 }
+// Persist initial risk and execution prices by ticket, without overwriting
+// an existing record. Missing records are excluded from R statistics.
+string FillFile(const int ticket)
+{
+   return JournalName()+".fill_"+IntegerToString(ticket)+".csv";
+}
+bool SaveFill(const int ticket,const string key,const double requested,
+              const double fill,const double spread,const double risk,
+              const int direction)
+{
+   string name=FillFile(ticket);
+   if(FileIsExist(name)) return false;
+   int f=FileOpen(name,FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(f==INVALID_HANDLE) return false;
+   uint n=FileWrite(f,key,ticket,DoubleToString(requested,Digits),
+      DoubleToString(fill,Digits),DoubleToString(spread,Digits),
+      DoubleToString(direction*(fill-requested),Digits),
+      DoubleToString(risk,10));
+   FileFlush(f);FileClose(f);
+   return n>0;
+}
+bool ReadFillRisk(const int ticket,double &risk)
+{
+   int f=FileOpen(FillFile(ticket),FILE_READ|FILE_CSV|FILE_ANSI,';');
+   if(f==INVALID_HANDLE) return false;
+   string key=FileReadString(f);
+   int stored=(int)FileReadNumber(f);
+   double requested=FileReadNumber(f);
+   double fill=FileReadNumber(f);
+   double spread=FileReadNumber(f);
+   double slip=FileReadNumber(f);
+   risk=FileReadNumber(f);
+   FileClose(f);
+   return StringLen(key)>0 && stored==ticket && requested>0 && fill>0 &&
+      spread>=0 && MathIsValidNumber(slip) &&
+      MathIsValidNumber(risk) && risk>0;
+}
 bool DispatchCandidate(const string key,const Setup &s)
 {
    if(!ExecutionAllowed()){EventLog(key,"BLOCKED","EXECUTION_GATE");return false;}
@@ -346,6 +383,8 @@ bool DispatchCandidate(const string key,const Setup &s)
    double stop=NormalizeDouble(p.stop,Digits);
    double target=NormalizeDouble(p.target,Digits);
    if(!ExecutionAllowed()){EventLog(key,"BLOCKED","MODE_CHANGED");return false;}
+   double requestedSpread=Ask-Bid;
+   if(requestedSpread<0 || !MathIsValidNumber(requestedSpread)) return false;
    if(!BeginRecovery(key)){EventLog(key,"BLOCKED","RECOVERY_MARKER");return false;}
    ResetLastError();
    int ticket=OrderSend(Symbol(),type,p.lots,entry,MaxSlippagePoints,
@@ -370,6 +409,8 @@ bool DispatchCandidate(const string key,const Setup &s)
    double actualRisk=OrderLots()*(actualR/ts*tv+EstimatedRoundTripCostPerLot);
    if(!MathIsValidNumber(actualRisk) || actualRisk>p.riskMoney+0.000001)
    {EventLog(key,"RECONCILIATION_REQUIRED","FILL_RISK_EXCEEDED");return false;}
+   if(!SaveFill(ticket,key,entry,fill,requestedSpread,actualRisk,s.direction))
+   {EventLog(key,"RECONCILIATION_REQUIRED","FILL_RECORD_FAILED");return false;}
    double tp=NormalizeDouble(fill+s.direction*3.0*actualR,Digits);
    if(tp<=0){EventLog(key,"RECONCILIATION_REQUIRED","TARGET_INVALID");return false;}
    if(MathAbs(OrderTakeProfit()-tp)>Point*0.1)
@@ -420,7 +461,7 @@ void ExportClosedHistory()
    int f=FileOpen(JournalName()+".closed_snapshot.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
    if(f==INVALID_HANDLE){Print("HISTORY_EXPORT_FAILED");return;}
    FileWrite(f,"ticket","type","lots","open_time","close_time","entry","exit","sl","tp","profit","commission","swap","net");
-   double net=0,gain=0,loss=0,peak=0,dd=0;int wins=0;
+   double net=0,gain=0,loss=0,peak=0,dd=0,sumR=0;int wins=0,rCount=0;
    for(int q=0;q<count;q++)
    {
       if(!OrderSelect(tickets[q],SELECT_BY_TICKET) || OrderCloseTime()!=times[q])
@@ -428,6 +469,8 @@ void ExportClosedHistory()
       FileWrite(f,OrderTicket(),OrderType(),OrderLots(),TimeToString(OrderOpenTime(),TIME_DATE|TIME_SECONDS),
          TimeToString(OrderCloseTime(),TIME_DATE|TIME_SECONDS),OrderOpenPrice(),OrderClosePrice(),
          OrderStopLoss(),OrderTakeProfit(),OrderProfit(),OrderCommission(),OrderSwap(),pnl[q]);
+      double initialRisk=0;
+      if(ReadFillRisk(tickets[q],initialRisk)){sumR+=pnl[q]/initialRisk;rCount++;}
       net+=pnl[q];gain+=MathMax(0.0,pnl[q]);loss+=MathMax(0.0,-pnl[q]);
       if(pnl[q]>0) wins++;
       peak=MathMax(peak,net);dd=MathMax(dd,peak-net);
@@ -435,11 +478,12 @@ void ExportClosedHistory()
    FileFlush(f);FileClose(f);
    int m=FileOpen(JournalName()+".metrics.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
    if(m==INVALID_HANDLE) return;
-   FileWrite(m,"scope","trades","net","gross_gain","gross_loss","profit_factor","win_rate_pct","mean_net_per_trade","closed_pnl_drawdown");
+   FileWrite(m,"scope","trades","net","gross_gain","gross_loss","profit_factor","win_rate_pct","mean_net_per_trade","closed_pnl_drawdown","r_sample_count","expectancy_r");
    FileWrite(m,"LOADED_HISTORY_ONLY",count,net,gain,loss,
       loss>0?DoubleToString(gain/loss,8):"NA",
       count>0?DoubleToString(100.0*wins/count,8):"NA",
-      count>0?DoubleToString(net/count,8):"NA",dd);
+      count>0?DoubleToString(net/count,8):"NA",dd,rCount,
+      rCount>0?DoubleToString(sumR/rCount,8):"NA");
    FileFlush(m);FileClose(m);
 }
 int OnInit()

@@ -1,2 +1,3 @@
 # Reports
-Store sanitized dated validation and DEMO statistics: net profit, profit factor, win rate, expectancy R, drawdown, trades, spread, commission, swap, slippage. No account identifiers or credentials. No results yet.
+
+Sanitized summary: [2026-11-25 checkpoint](../docs/CHECKPOINT_2026-11-25.md). Detailed replay JSON files remain in the local project reports directory; not published here. No account identifiers, credentials or private logs. Historical metrics are not broker execution evidence.

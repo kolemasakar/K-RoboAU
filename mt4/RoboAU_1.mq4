@@ -1,10 +1,18 @@
 #property strict
-#property version "0.930"
+#property version "0.940"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
 input int MagicNumber=710001;
 input int MaxSlippagePoints=0;
+input double TradeRiskPercent=5.0;
+input double DailyRiskPercent=10.0;
+input double AggregateRiskPercent=10.0;
+input double MaximumStopDistance=50.0;
+// Provisional broker server schedule, inferred from archived M5 data.
+input int FridaySessionCloseHour=23;
+input int FridaySessionCloseMinute=45;
+input int WeekendCloseLeadMinutes=5;
 // Source-level release lock. Removed only after acceptance.
 const bool ExecutionReleaseAccepted=false;
 
@@ -172,7 +180,7 @@ bool BuildPlan(const int dir,const double entry,const double rawStop,
    // Round the structural stop away from entry, never toward it.
    double stop=(dir==1?MathFloor(rawStop/tickSize):MathCeil(rawStop/tickSize))*tickSize;
    double distance=dir*(entry-stop);
-   if(distance<=0 || stop<=0) return false;
+   if(distance<=0 || stop<=0 || distance>MaximumStopDistance) return false;
    double target=entry+dir*3.0*distance;
    if(target<=0 || !MathIsValidNumber(target)) return false;
    double lossPerLot=distance/tickSize*tickValue+extraCostPerLot;
@@ -193,8 +201,8 @@ double AvailableBudget(const double equity,const double dayBase,
    if(!MathIsValidNumber(equity)||!MathIsValidNumber(dayBase)||
       !MathIsValidNumber(realizedLoss)||!MathIsValidNumber(openRisk)||
       equity<=0 || dayBase<=0 || realizedLoss<0 || openRisk<0) return 0;
-   return MathMax(0.0,MathMin(0.02*equity,
-             MathMin(0.05*dayBase-realizedLoss-openRisk,0.10*equity-openRisk)));
+   return MathMax(0.0,MathMin(TradeRiskPercent/100.0*equity,
+             MathMin(DailyRiskPercent/100.0*dayBase-realizedLoss-openRisk,AggregateRiskPercent/100.0*equity-openRisk)));
 }
 bool AccountModeAllowed()
 {
@@ -293,8 +301,8 @@ bool BrokerPlan(const Setup &s,TradePlan &p,string &reason)
    if(dailyAvailable) budget=AvailableBudget(eq,base,loss,risk);
    else
    {
-      budget=MathMax(0.0,MathMin(0.02*eq,0.10*eq-risk));
-      Print("DAILY_RISK_UNAVAILABLE: using 2% and 10% limits only");
+      budget=MathMax(0.0,MathMin(TradeRiskPercent/100.0*eq,AggregateRiskPercent/100.0*eq-risk));
+      Print("DAILY_RISK_UNAVAILABLE: using trade and aggregate limits only");
    }
    RefreshRates();
    double entry=(s.direction==1?Ask:Bid);
@@ -443,7 +451,7 @@ bool DispatchCandidate(const string key,const Setup &s)
    double fill=OrderOpenPrice();
    double actualStop=OrderStopLoss();
    double actualR=s.direction*(fill-actualStop);
-   if(actualStop<=0 || actualR<=0)
+   if(actualStop<=0 || actualR<=0 || actualR>MaximumStopDistance)
    {EventLog(key,"RECONCILIATION_REQUIRED","STOP_INVALID");return false;}
    double ts=MarketInfo(Symbol(),MODE_TICKSIZE),tv=MarketInfo(Symbol(),MODE_TICKVALUE);
    if(ts<=0 || tv<=0 || OrderLots()<=0 || OrderSymbol()!=Symbol() ||
@@ -533,6 +541,7 @@ void ExportClosedHistory()
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
+   if(TradeRiskPercent<=0 || TradeRiskPercent>5 || DailyRiskPercent<=0 || DailyRiskPercent>10 || AggregateRiskPercent<=0 || AggregateRiskPercent>10 || MaximumStopDistance<=0 || MaximumStopDistance>50 || FridaySessionCloseHour<0 || FridaySessionCloseHour>23 || FridaySessionCloseMinute<0 || FridaySessionCloseMinute>59 || WeekendCloseLeadMinutes<5 || WeekendCloseLeadMinutes>60 || FridaySessionCloseHour*60+FridaySessionCloseMinute<WeekendCloseLeadMinutes) return INIT_PARAMETERS_INCORRECT;
    // Hold an exclusive file handle for the full EA lifetime.
    // Terminal/tester sandboxes are separate. Common folder coordinates terminals.
    instanceLock=FileOpen(JournalName()+".instance.lock",
@@ -549,9 +558,41 @@ void OnDeinit(const int reason)
 {
    if(instanceLock!=INVALID_HANDLE){FileClose(instanceLock);instanceLock=INVALID_HANDLE;}
 }
+// Friday cutoff is in broker server time. No per-trade age limit.
+// Actual holiday exceptions require a separately verified session schedule.
+bool WeekendEntryBlocked(const datetime now)
+{
+   int day=TimeDayOfWeek(now);
+   if(day==6 || day==0) return true;
+   if(day!=5) return false;
+   return TimeHour(now)*60+TimeMinute(now)>=
+          FridaySessionCloseHour*60+FridaySessionCloseMinute-WeekendCloseLeadMinutes;
+}
+void ManageWeekendClose()
+{
+   // Do not let a recovery marker prevent reducing known EA exposure.
+   // The release lock and account gate still apply to every broker mutation.
+   if(!EnableTrading || !AccountModeAllowed() ||
+      (!IsTesting() && (!ExecutionReleaseAccepted || !IsTradeAllowed()))) return;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_TRADES)) continue;
+      if(OrderSymbol()!=Symbol() || OrderMagicNumber()!=MagicNumber) continue;
+      int type=OrderType();
+      if(type!=OP_BUY && type!=OP_SELL) continue;
+      int ticket=OrderTicket();
+      double lots=OrderLots();
+      RefreshRates();
+      ResetLastError();
+      if(!OrderClose(ticket,lots,type==OP_BUY?Bid:Ask,MaxSlippagePoints,clrNONE))
+         EventLog(IntegerToString(ticket),"WEEKEND_CLOSE_FAILED",IntegerToString(GetLastError()));
+      else EventLog(IntegerToString(ticket),"WEEKEND_CLOSED","MARKET");
+   }
+}
 void OnTick()
 {
    if(instanceLock==INVALID_HANDLE) return;
+   if(WeekendEntryBlocked(TimeCurrent())) {ManageWeekendClose();return;}
    datetime now=iTime(Symbol(),PERIOD_M5,0);
    if(now<=0 || now<=lastBar) return;
    Bar d[],h[],m[];

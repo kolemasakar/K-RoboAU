@@ -1,5 +1,5 @@
 #property strict
-#property version "0.60"
+#property version "0.70"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -305,8 +305,22 @@ bool BrokerPlan(const Setup &s,TradePlan &p,string &reason)
 }
 // Broker execution candidate. Never called against a live terminal by
 // this development release; tester execution requires explicit enable.
+// Persistent fail-closed marker: retained across restart after any uncertain
+// submission or failed verification. Never automatically clear it.
+string RecoveryFile(){return JournalName()+".recovery";}
+bool RecoveryBlocked(){return FileIsExist(RecoveryFile());}
+bool BeginRecovery(const string key)
+{
+   if(RecoveryBlocked()) return false;
+   int f=FileOpen(RecoveryFile(),FILE_WRITE|FILE_TXT|FILE_ANSI);
+   if(f==INVALID_HANDLE) return false;
+   uint n=FileWriteString(f,key+"\r\n");
+   FileFlush(f);FileClose(f);
+   return n>0 && FileIsExist(RecoveryFile());
+}
 bool ExecutionAllowed()
 {
+   if(RecoveryBlocked()) return false;
    if(!EnableTrading || !AccountModeAllowed()) return false;
    if(IsTesting()) return true;
    return ExecutionReleaseAccepted && IsTradeAllowed();
@@ -332,6 +346,7 @@ bool DispatchCandidate(const string key,const Setup &s)
    double stop=NormalizeDouble(p.stop,Digits);
    double target=NormalizeDouble(p.target,Digits);
    if(!ExecutionAllowed()){EventLog(key,"BLOCKED","MODE_CHANGED");return false;}
+   if(!BeginRecovery(key)){EventLog(key,"BLOCKED","RECOVERY_MARKER");return false;}
    ResetLastError();
    int ticket=OrderSend(Symbol(),type,p.lots,entry,MaxSlippagePoints,
                         stop,target,"RoboAU1",MagicNumber,0,clrNONE);
@@ -341,12 +356,20 @@ bool DispatchCandidate(const string key,const Setup &s)
    if(!OrderSelect(ticket,SELECT_BY_TICKET))
    {EventLog(key,"RECONCILIATION_REQUIRED","SELECT_FAILED");return false;}
    if(OrderCloseTime()!=0)
-   {EventLog(key,"ALREADY_CLOSED",IntegerToString(ticket));return true;}
+   {EventLog(key,"RECONCILIATION_REQUIRED","ALREADY_CLOSED");return false;}
    double fill=OrderOpenPrice();
    double actualStop=OrderStopLoss();
    double actualR=s.direction*(fill-actualStop);
    if(actualStop<=0 || actualR<=0)
    {EventLog(key,"RECONCILIATION_REQUIRED","STOP_INVALID");return false;}
+   double ts=MarketInfo(Symbol(),MODE_TICKSIZE),tv=MarketInfo(Symbol(),MODE_TICKVALUE);
+   if(ts<=0 || tv<=0 || OrderLots()<=0 || OrderSymbol()!=Symbol() ||
+      OrderMagicNumber()!=MagicNumber || OrderType()!=type ||
+      MathAbs(actualStop-stop)>Point*0.1)
+   {EventLog(key,"RECONCILIATION_REQUIRED","FILL_IDENTITY_OR_STOP");return false;}
+   double actualRisk=OrderLots()*(actualR/ts*tv+EstimatedRoundTripCostPerLot);
+   if(!MathIsValidNumber(actualRisk) || actualRisk>p.riskMoney+0.000001)
+   {EventLog(key,"RECONCILIATION_REQUIRED","FILL_RISK_EXCEEDED");return false;}
    double tp=NormalizeDouble(fill+s.direction*3.0*actualR,Digits);
    if(tp<=0){EventLog(key,"RECONCILIATION_REQUIRED","TARGET_INVALID");return false;}
    if(MathAbs(OrderTakeProfit()-tp)>Point*0.1)
@@ -355,15 +378,22 @@ bool DispatchCandidate(const string key,const Setup &s)
       if(!OrderModify(ticket,fill,actualStop,tp,0,clrNONE))
       {EventLog(key,"RECONCILIATION_REQUIRED","TP_MODIFY_"+IntegerToString(GetLastError()));return false;}
    }
+   if(!OrderSelect(ticket,SELECT_BY_TICKET) || OrderCloseTime()!=0 ||
+      MathAbs(OrderStopLoss()-actualStop)>Point*0.1 ||
+      MathAbs(OrderTakeProfit()-tp)>Point*0.1)
+   {EventLog(key,"RECONCILIATION_REQUIRED","PROTECTION_VERIFY");return false;}
    EventLog(key,"OPENED","ticket="+IntegerToString(ticket)+
             " fill="+DoubleToString(fill,Digits)+" tp="+DoubleToString(tp,Digits));
+   if(!FileDelete(RecoveryFile()))
+   {EventLog(key,"RECONCILIATION_REQUIRED","MARKER_DELETE_FAILED");return false;}
    return true;
 }
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
    lastBar=iTime(Symbol(),PERIOD_M5,0);
-   Print("RoboAU 1 signal-only development build: no order execution.");
+   Print("RoboAU 1 release locked; recovery marker=",RecoveryBlocked());
+   if(RecoveryBlocked()) Print("RECONCILIATION_REQUIRED: inspect broker orders and journal before release.");
    return INIT_SUCCEEDED;
 }
 void OnTick()

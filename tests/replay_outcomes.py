@@ -1,7 +1,7 @@
 """Offline OHLC outcome model for actual MQL4 replay signals; no broker calls."""
 import csv, json, argparse, math
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 from datetime import datetime
 def read(p, header=True):
     with p.open(newline="",encoding="ascii") as f:
@@ -14,7 +14,7 @@ def run(root, initial, fee, slip):
     bybar=defaultdict(list)
     for s in signals: bybar[index[s["cutoff"]]].append(s)
     balance=initial; active=[]; closed=[]; rejected=0; peak=initial; dd=0; eqpeak=initial; eqdd=0
-    day=None; daybase=initial; loss=0; curve=[]
+    day=None; daybase=initial; loss=0; curve=[]; reasons=Counter(); rejected_details=[]
     def finish(p,price,t,reason):
         nonlocal balance,loss,peak,dd
         exit=price*(1-p["dir"]*slip)
@@ -38,10 +38,16 @@ def run(root, initial, fee, slip):
             risk=sum(p["qty"]*max(0,p["dir"]*(o-p["stop"])) for p in active)
             budget=min(.02*equity,.05*daybase-loss-risk,.10*equity-risk)
             unitloss=r+fee*(entry+stop)+slip*stop
-            if r<=0 or target<=0 or budget<=0: rejected+=1;continue
+            limits={"TRADE_2PCT":.02*equity,"DAILY_5PCT":.05*daybase-loss-risk,"AGGREGATE_10PCT":.10*equity-risk}
+            binding=min(limits,key=limits.get)
+            def reject(reason):
+                reasons[reason]+=1
+                rejected_details.append(dict(time=t,reason=reason,binding=binding,budget=budget,minimum_unit_loss=unitloss,stop_distance=r,equity=equity))
+            if r<=0 or target<=0: rejected+=1;reject("INVALID_GEOMETRY");continue
+            if budget<=0: rejected+=1;reject("NO_BUDGET_"+binding);continue
             # Illustrative 100 oz/lot and 0.01 lot step, not verified broker metadata.
             qty=math.floor(budget/unitloss+1e-10)
-            if qty<1: rejected+=1;continue
+            if qty<1: rejected+=1;reject('MIN_LOT_'+binding);continue
             active.append(dict(time=t,dir=d,entry=entry,stop=stop,target=target,qty=qty,risk=qty*unitloss))
         for p in active[:]:
             hitstop=l<=p["stop"] if p["dir"]==1 else h>=p["stop"]
@@ -52,10 +58,10 @@ def run(root, initial, fee, slip):
         eqpeak=max(eqpeak,equity);eqdd=max(eqdd,eqpeak-equity)
     gains=sum(max(0,p["net"]) for p in closed);losses=sum(max(0,-p["net"]) for p in closed)
     n=len(closed)
-    return dict(signals=len(signals),closed=n,open_censored=len(active),rejected=rejected,initial=initial,final_balance=balance,net=balance-initial,profit_factor=gains/losses if losses else None,win_rate=sum(p["net"]>0 for p in closed)/n if n else None,expectancy_r=sum(p["r"] for p in closed)/n if n else None,closed_drawdown=dd,bar_close_equity_drawdown=eqdd,fee_per_side=fee,slippage_per_side=slip,curve=curve,trades=closed)
+    return dict(signals=len(signals),closed=n,open_censored=len(active),rejected=rejected,initial=initial,final_balance=balance,net=balance-initial,profit_factor=gains/losses if losses else None,win_rate=sum(p["net"]>0 for p in closed)/n if n else None,expectancy_r=sum(p["r"] for p in closed)/n if n else None,closed_drawdown=dd,bar_close_equity_drawdown=eqdd,fee_per_side=fee,slippage_per_side=slip,curve=curve,trades=closed,rejection_reasons=dict(reasons),rejected_details=rejected_details)
 if __name__=="__main__":
     p=argparse.ArgumentParser();p.add_argument("root",type=Path);p.add_argument("output",type=Path);p.add_argument("--initial",type=float,default=1189.05)
     a=p.parse_args()
     result={"gross":run(a.root,a.initial,0,0),"cost_scenario":run(a.root,a.initial,.0005,.0002)}
     a.output.write_text(json.dumps(result,indent=2),encoding="utf-8")
-    print(json.dumps({k:{x:y for x,y in v.items() if x not in ("curve","trades")} for k,v in result.items()},indent=2))
+    print(json.dumps({k:{x:y for x,y in v.items() if x not in ("curve","trades","rejected_details")} for k,v in result.items()},indent=2))

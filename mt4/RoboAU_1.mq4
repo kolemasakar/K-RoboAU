@@ -1,5 +1,5 @@
 #property strict
-#property version "0.910"
+#property version "0.920"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -319,6 +319,40 @@ bool BeginRecovery(const string key)
    FileFlush(f);FileClose(f);
    return n>0 && FileIsExist(RecoveryFile());
 }
+// Read-only reconciliation: report known broker positions and protection
+// after restart. Unknown submissions remain locked; absence of an order
+// in the locally loaded history is not proof of non-execution.
+void ReconcileBrokerState()
+{
+   int active=0,history=0,invalid=0,missing=0;
+   for(int i=0;i<OrdersTotal();i++)
+   {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_TRADES))
+      {invalid++;continue;}
+      if(OrderSymbol()!=Symbol() || OrderMagicNumber()!=MagicNumber) continue;
+      active++;
+      int type=OrderType();
+      double entry=OrderOpenPrice(),sl=OrderStopLoss(),tp=OrderTakeProfit();
+      int dir=(type==OP_BUY?1:type==OP_SELL?-1:0);
+      double risk=dir*(entry-sl);
+      if(dir==0 || sl<=0 || tp<=0 || risk<=0 ||
+         MathAbs(tp-(entry+dir*3.0*risk))>Point*0.51) invalid++;
+      if(!FileIsExist(JournalName()+".fill_"+IntegerToString(OrderTicket())+".csv")) missing++;
+      Print("RECOVERY_OPEN ticket=",OrderTicket()," type=",type,
+            " lots=",OrderLots()," SL=",sl," TP=",tp);
+   }
+   for(int j=0;j<OrdersHistoryTotal();j++)
+   {
+      if(!OrderSelect(j,SELECT_BY_POS,MODE_HISTORY))
+      {invalid++;continue;}
+      if(OrderSymbol()==Symbol() && OrderMagicNumber()==MagicNumber &&
+         (OrderType()==OP_BUY || OrderType()==OP_SELL)) history++;
+   }
+   Print("RECOVERY_SUMMARY active=",active," loaded_closed=",history,
+         " invalid=",invalid," missing_fill=",missing," marker=",RecoveryBlocked());
+   if((invalid>0 || missing>0) && !RecoveryBlocked())
+      BeginRecovery("RESTART_BROKER_STATE_UNVERIFIED");
+}
 bool ExecutionAllowed()
 {
    if(RecoveryBlocked()) return false;
@@ -498,6 +532,7 @@ int OnInit()
    {Print("INSTANCE_LOCK_FAILED ",GetLastError());return INIT_FAILED;}
    lastBar=iTime(Symbol(),PERIOD_M5,0);
    Print("RoboAU 1 release locked; recovery marker=",RecoveryBlocked());
+   ReconcileBrokerState();
    if(RecoveryBlocked()) Print("RECONCILIATION_REQUIRED: inspect broker orders and journal before release.");
    return INIT_SUCCEEDED;
 }

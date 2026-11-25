@@ -1,5 +1,5 @@
 #property strict
-#property version "0.70"
+#property version "0.80"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -388,6 +388,60 @@ bool DispatchCandidate(const string key,const Setup &s)
    {EventLog(key,"RECONCILIATION_REQUIRED","MARKER_DELETE_FAILED");return false;}
    return true;
 }
+// Read-only snapshot of the loaded broker history, scoped to this EA.
+// Balance-curve drawdown is not intratrade equity drawdown.
+void ExportClosedHistory()
+{
+   int tickets[];
+   datetime times[];
+   double pnl[];
+   int count=0;
+   for(int i=0;i<OrdersHistoryTotal();i++)
+   {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_HISTORY)) return;
+      if(OrderSymbol()!=Symbol() || OrderMagicNumber()!=MagicNumber ||
+         (OrderType()!=OP_BUY && OrderType()!=OP_SELL)) continue;
+      ArrayResize(tickets,count+1);ArrayResize(times,count+1);ArrayResize(pnl,count+1);
+      tickets[count]=OrderTicket();times[count]=OrderCloseTime();
+      pnl[count]=OrderProfit()+OrderCommission()+OrderSwap();count++;
+   }
+   // Stable order by close time, then ticket.
+   for(int j=1;j<count;j++)
+   {
+      int k=j;
+      while(k>0 && (times[k]<times[k-1] ||
+            (times[k]==times[k-1] && tickets[k]<tickets[k-1])))
+      {
+         int t=tickets[k];tickets[k]=tickets[k-1];tickets[k-1]=t;
+         datetime dt=times[k];times[k]=times[k-1];times[k-1]=dt;
+         double v=pnl[k];pnl[k]=pnl[k-1];pnl[k-1]=v;k--;
+      }
+   }
+   int f=FileOpen(JournalName()+".closed_snapshot.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(f==INVALID_HANDLE){Print("HISTORY_EXPORT_FAILED");return;}
+   FileWrite(f,"ticket","type","lots","open_time","close_time","entry","exit","sl","tp","profit","commission","swap","net");
+   double net=0,gain=0,loss=0,peak=0,dd=0;int wins=0;
+   for(int q=0;q<count;q++)
+   {
+      if(!OrderSelect(tickets[q],SELECT_BY_TICKET) || OrderCloseTime()!=times[q])
+      {FileClose(f);Print("HISTORY_CHANGED");return;}
+      FileWrite(f,OrderTicket(),OrderType(),OrderLots(),TimeToString(OrderOpenTime(),TIME_DATE|TIME_SECONDS),
+         TimeToString(OrderCloseTime(),TIME_DATE|TIME_SECONDS),OrderOpenPrice(),OrderClosePrice(),
+         OrderStopLoss(),OrderTakeProfit(),OrderProfit(),OrderCommission(),OrderSwap(),pnl[q]);
+      net+=pnl[q];gain+=MathMax(0.0,pnl[q]);loss+=MathMax(0.0,-pnl[q]);
+      if(pnl[q]>0) wins++;
+      peak=MathMax(peak,net);dd=MathMax(dd,peak-net);
+   }
+   FileFlush(f);FileClose(f);
+   int m=FileOpen(JournalName()+".metrics.csv",FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(m==INVALID_HANDLE) return;
+   FileWrite(m,"scope","trades","net","gross_gain","gross_loss","profit_factor","win_rate_pct","mean_net_per_trade","closed_pnl_drawdown");
+   FileWrite(m,"LOADED_HISTORY_ONLY",count,net,gain,loss,
+      loss>0?DoubleToString(gain/loss,8):"NA",
+      count>0?DoubleToString(100.0*wins/count,8):"NA",
+      count>0?DoubleToString(net/count,8):"NA",dd);
+   FileFlush(m);FileClose(m);
+}
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
@@ -406,6 +460,7 @@ void OnTick()
    // Avoid a mixed snapshot if a new M5 bar appeared while reading.
    if(iTime(Symbol(),PERIOD_M5,0)!=now) return;
    lastBar=now;
+   ExportClosedHistory();
    int dir=Direction(d);
    Setup s;
    if(dir==0 || !Structure(h,dir,s) || !Confirm(m,s)) return;

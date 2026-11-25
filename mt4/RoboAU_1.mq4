@@ -1,5 +1,5 @@
 #property strict
-#property version "0.920"
+#property version "0.930"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -235,33 +235,35 @@ bool ReserveSignal(const string key,const Setup &s)
    FileClose(f);
    return written>0;
 }
-// Read-only account snapshot. Day base is reconstructed from loaded history;
-// incomplete history or cash adjustments cannot establish an accepted baseline.
+// Use available closed trades today; no audit of full account history.
+// If daily data are unavailable, skip only the daily limit.
 bool ReadAccountRisk(double &balance,double &equity,double &margin,
-                     double &dayBase,double &loss,double &openRisk)
+                     double &dayBase,double &loss,double &openRisk,bool &dailyAvailable)
 {
    balance=AccountBalance(); equity=AccountEquity(); margin=AccountFreeMargin();
    dayBase=balance; loss=0; openRisk=0;
    datetime today=StringToTime(TimeToString(TimeCurrent(),TIME_DATE));
-   if(today<=0 || balance<=0 || equity<=0 || margin<=0) return false;
-   bool prior=false;
-   for(int i=0;i<OrdersHistoryTotal();i++)
+   if(balance<=0 || equity<=0 || margin<=0) return false;
+   dailyAvailable=(today>0 && OrdersHistoryTotal()>0);
+   int historyCount=OrdersHistoryTotal();
+   for(int i=0;i<historyCount && dailyAvailable;i++)
    {
-      if(!OrderSelect(i,SELECT_BY_POS,MODE_HISTORY)) return false;
-      if(OrderCloseTime()<today){prior=true;continue;}
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_HISTORY)){dailyAvailable=false;break;}
+      if(OrderCloseTime()<today) continue;
       int type=OrderType();
       if(type!=OP_BUY && type!=OP_SELL)
       {
-         if(type>OP_SELLSTOP) return false;
+         if(type>OP_SELLSTOP){dailyAvailable=false;break;}
          continue;
       }
       double net=OrderProfit()+OrderSwap()+OrderCommission();
-      if(!MathIsValidNumber(net)) return false;
+      if(!MathIsValidNumber(net)){dailyAvailable=false;break;}
       dayBase-=net;
       loss+=MathMax(0.0,-net);
    }
-   // Conservative: refuse if loaded history does not extend before today.
-   if(!prior || dayBase<=0) return false;
+   if(dayBase<=0 || !MathIsValidNumber(dayBase) || OrdersHistoryTotal()!=historyCount)
+      dailyAvailable=false;
+   if(!dailyAvailable){dayBase=0;loss=0;}
    for(int j=0;j<OrdersTotal();j++)
    {
       if(!OrderSelect(j,SELECT_BY_POS,MODE_TRADES)) return false;
@@ -284,9 +286,16 @@ bool BrokerPlan(const Setup &s,TradePlan &p,string &reason)
    if(!AccountModeAllowed()){reason="ACCOUNT_MODE";return false;}
    if(EstimatedRoundTripCostPerLot<0){reason="COST_NOT_CONFIGURED";return false;}
    double bal,eq,margin,base,loss,risk;
-   if(!ReadAccountRisk(bal,eq,margin,base,loss,risk))
+   bool dailyAvailable=false;
+   if(!ReadAccountRisk(bal,eq,margin,base,loss,risk,dailyAvailable))
    {reason="ACCOUNT_RISK_UNVERIFIED";return false;}
-   double budget=AvailableBudget(eq,base,loss,risk);
+   double budget=0;
+   if(dailyAvailable) budget=AvailableBudget(eq,base,loss,risk);
+   else
+   {
+      budget=MathMax(0.0,MathMin(0.02*eq,0.10*eq-risk));
+      Print("DAILY_RISK_UNAVAILABLE: using 2% and 10% limits only");
+   }
    RefreshRates();
    double entry=(s.direction==1?Ask:Bid);
    double ts=MarketInfo(Symbol(),MODE_TICKSIZE),tv=MarketInfo(Symbol(),MODE_TICKVALUE);

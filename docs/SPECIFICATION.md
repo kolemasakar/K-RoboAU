@@ -11,7 +11,7 @@ M5 confirmation latest closed candle starting at or after H1 continuation close.
 
 ## Exit and risk
 BUY SL=retest low-0.10 continuation ATR; SELL SL=retest high+0.10 continuation ATR. R=positive distance from actual fill to SL; TP=fill +/-3R. No trailing, partial close or timed exit. Historical model 2016 M5 bars, unresolved censored, STOP_FIRST collision, fees 5 bps and adverse slippage 2 bps per side. Broker costs are observed, not simulated.
-GerchikCo DEMO initially; risk ceilings 2% per trade, 5% daily, 10% aggregate. Exact accounting and recovery validation required. Round lot down, check margin and broker limits. Physical SL/TP required. AllowLiveTrading defaults false, owner-controlled; off blocks new entries, retains existing protection. Unknown mode fails closed. Release requires separate acceptance. No credentials in public repo.
+GerchikCo DEMO initially; risk ceilings 2% per trade, 5% daily when today's closed-trade data are available, 10% aggregate. No full account-history completeness audit. If daily data are unavailable, log DAILY_RISK_UNAVAILABLE and apply only 2% and 10% ceilings. Continue recording closed-trade results. Loaded history may be incomplete; daily enforcement is best effort. Recovery validation required. Round lot down, check margin and broker limits. Physical SL/TP required. AllowLiveTrading defaults false, owner-controlled; off blocks new entries, retains existing protection. Unknown mode fails closed. Release requires separate acceptance. No credentials in public repo.
 
 ## Architecture
-One standalone MQL4 EA. No Bridge, Python runtime, SQLite or level indicator dependency. Initial increment analytical only. No execution in initial build.
+One standalone MQL4 EA. No Bridge, Python runtime, SQLite or level indicator dependency. Development execution path implemented; terminal execution remains source-locked pending acceptance.

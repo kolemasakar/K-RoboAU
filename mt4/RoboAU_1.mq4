@@ -1,7 +1,12 @@
 #property strict
-#property version "0.50"
-#property description "RoboAU 1 risk integration; execution disabled"
+#property version "0.60"
+#property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
+input bool EnableTrading=false;
+input int MagicNumber=710001;
+input int MaxSlippagePoints=0;
+// Source-level release lock. Removed only after acceptance.
+const bool ExecutionReleaseAccepted=false;
 
 bool EmaPair(const double &closes[], const int period, const int lookback,
              double &current, double &past)
@@ -298,6 +303,62 @@ bool BrokerPlan(const Setup &s,TradePlan &p,string &reason)
    if(remaining<=0 || GetLastError()!=0){reason="MARGIN";return false;}
    reason="PLAN_ONLY";return true;
 }
+// Broker execution candidate. Never called against a live terminal by
+// this development release; tester execution requires explicit enable.
+bool ExecutionAllowed()
+{
+   if(!EnableTrading || !AccountModeAllowed()) return false;
+   if(IsTesting()) return true;
+   return ExecutionReleaseAccepted && IsTradeAllowed();
+}
+void EventLog(const string key,const string status,const string detail)
+{
+   Print("ROBOAU ",key," ",status," ",detail);
+   int f=FileOpen(JournalName()+".events.csv",FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   if(f==INVALID_HANDLE){Print("EVENT_LOG_FAILED ",GetLastError());return;}
+   if(FileSeek(f,0,SEEK_END))
+      FileWrite(f,TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),key,status,detail);
+   FileFlush(f);FileClose(f);
+}
+bool DispatchCandidate(const string key,const Setup &s)
+{
+   if(!ExecutionAllowed()){EventLog(key,"BLOCKED","EXECUTION_GATE");return false;}
+   TradePlan p; string reason="";
+   if(!BrokerPlan(s,p,reason)){EventLog(key,"REJECTED",reason);return false;}
+   // A persistent reservation was written before this function.
+   // Never retry an uncertain submission automatically.
+   int type=(s.direction==1?OP_BUY:OP_SELL);
+   double entry=NormalizeDouble(p.entry,Digits);
+   double stop=NormalizeDouble(p.stop,Digits);
+   double target=NormalizeDouble(p.target,Digits);
+   if(!ExecutionAllowed()){EventLog(key,"BLOCKED","MODE_CHANGED");return false;}
+   ResetLastError();
+   int ticket=OrderSend(Symbol(),type,p.lots,entry,MaxSlippagePoints,
+                        stop,target,"RoboAU1",MagicNumber,0,clrNONE);
+   int err=GetLastError();
+   if(ticket<0){EventLog(key,"SUBMISSION_FAILED",IntegerToString(err));return false;}
+   EventLog(key,"TICKET",IntegerToString(ticket));
+   if(!OrderSelect(ticket,SELECT_BY_TICKET))
+   {EventLog(key,"RECONCILIATION_REQUIRED","SELECT_FAILED");return false;}
+   if(OrderCloseTime()!=0)
+   {EventLog(key,"ALREADY_CLOSED",IntegerToString(ticket));return true;}
+   double fill=OrderOpenPrice();
+   double actualStop=OrderStopLoss();
+   double actualR=s.direction*(fill-actualStop);
+   if(actualStop<=0 || actualR<=0)
+   {EventLog(key,"RECONCILIATION_REQUIRED","STOP_INVALID");return false;}
+   double tp=NormalizeDouble(fill+s.direction*3.0*actualR,Digits);
+   if(tp<=0){EventLog(key,"RECONCILIATION_REQUIRED","TARGET_INVALID");return false;}
+   if(MathAbs(OrderTakeProfit()-tp)>Point*0.1)
+   {
+      ResetLastError();
+      if(!OrderModify(ticket,fill,actualStop,tp,0,clrNONE))
+      {EventLog(key,"RECONCILIATION_REQUIRED","TP_MODIFY_"+IntegerToString(GetLastError()));return false;}
+   }
+   EventLog(key,"OPENED","ticket="+IntegerToString(ticket)+
+            " fill="+DoubleToString(fill,Digits)+" tp="+DoubleToString(tp,Digits));
+   return true;
+}
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
@@ -332,6 +393,6 @@ void OnTick()
       Print("PLAN_ONLY ",key," lots=",DoubleToString(p.lots,8),
             " entry=",p.entry," SL=",p.stop," TP=",p.target," risk=",p.riskMoney);
    else Print("PLAN_REJECTED ",key," reason=",reason);
-   // Dispatch remains disabled until history coverage, cost and recovery
-   // acceptance are established. No broker mutation here.
+   if(ExecutionAllowed()) DispatchCandidate(key,s);
+   else EventLog(key,"SIGNAL_ONLY","EXECUTION_GATE");
 }

@@ -1,9 +1,9 @@
 # Roadmap
-- R00-R03: initial audit, recovered reference contract, owner approval and repository setup complete. Original October result report not recovered.
-- R04-R05: EMA/ATR and D1/H1/M5 signal code implemented; historical parity pending.
-- R06: broker risk integration implemented; daily limit optional when data unavailable, no full-history audit (owner decision).
-- R07: execution candidate, persistent reservation, instance lock and startup reconciliation implemented. Uncertain submissions remain locked. Runtime acceptance pending.
-- R08: closed-trade results, fill records and metrics implemented; validation pending.
-- R09: compile 0.930 and fix defects; release candidate only after checks.
-- R10: use existing KAI MT4 XAUUSD archive MT4_MAX_AVAILABLE_20261009; no identity certification or additional studies. Run historical comparison after implementation; no optimization.
-- R11: separate owner approval for DEMO launch; LIVE disabled by default.
+- R00-R03: reference contract, owner approval and repository setup complete. Original discovery report recovered.
+- R04-R05: signal replay complete: 145 XAUUSD signals; discovery continuation identities and structural stops match 56/56. Original outcome evaluator matches 56/56 with original entry delay and censoring. Native execution parity pending.
+- R06: approved 5/10/10 risk and 50 USD stop cap implemented in 0.940. Daily limit optional if data unavailable; no full-history audit. Native risk acceptance pending.
+- R07: execution candidate, reservation, instance lock, recovery and Friday exit implemented. Native order lifecycle, restart, failed-close and reconciliation acceptance pending.
+- R08: fill and closed-history metrics implemented; native validation pending.
+- R09: 0.940 compile PASS (0 errors, 1 version warning). RC1 not accepted.
+- R10: KAI MT4 archive replay, original comparison, time exit and weekend/SL research complete; 80 weekend-risk scenarios completed. Retrospective session proxy accepted for historical research only; fixed Friday cutoff is provisional. Independent validation and native MT4 tester remain pending.
+- R11: separate owner approval for DEMO launch; terminal release lock and LIVE default-off remain in force.

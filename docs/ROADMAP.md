@@ -5,5 +5,5 @@
 - R07: execution candidate, persistent reservation, instance lock and startup reconciliation implemented. Uncertain submissions remain locked. Runtime acceptance pending.
 - R08: closed-trade results, fill records and metrics implemented; validation pending.
 - R09: compile 0.930 and fix defects; release candidate only after checks.
-- R10: identify original XAUUSD dataset and run full historical comparison after implementation; no optimization.
+- R10: use existing KAI MT4 XAUUSD archive MT4_MAX_AVAILABLE_20261009; no identity certification or additional studies. Run historical comparison after implementation; no optimization.
 - R11: separate owner approval for DEMO launch; LIVE disabled by default.

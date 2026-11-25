@@ -1,5 +1,5 @@
 #property strict
-#property version "0.90"
+#property version "0.910"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -202,6 +202,7 @@ bool AccountModeAllowed()
    if(mode==ACCOUNT_TRADE_MODE_DEMO) return true;
    return mode==ACCOUNT_TRADE_MODE_REAL && AllowLiveTrading;
 }
+int instanceLock=INVALID_HANDLE;
 datetime lastBar=0;
 string lastSetup="";
 // A separate, exclusive journal per account/server/symbol.
@@ -489,13 +490,24 @@ void ExportClosedHistory()
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
+   // Hold an exclusive file handle for the full EA lifetime.
+   // Terminal/tester sandboxes are separate. Common folder coordinates terminals.
+   instanceLock=FileOpen(JournalName()+".instance.lock",
+                         FILE_READ|FILE_WRITE|FILE_BIN|FILE_COMMON);
+   if(instanceLock==INVALID_HANDLE)
+   {Print("INSTANCE_LOCK_FAILED ",GetLastError());return INIT_FAILED;}
    lastBar=iTime(Symbol(),PERIOD_M5,0);
    Print("RoboAU 1 release locked; recovery marker=",RecoveryBlocked());
    if(RecoveryBlocked()) Print("RECONCILIATION_REQUIRED: inspect broker orders and journal before release.");
    return INIT_SUCCEEDED;
 }
+void OnDeinit(const int reason)
+{
+   if(instanceLock!=INVALID_HANDLE){FileClose(instanceLock);instanceLock=INVALID_HANDLE;}
+}
 void OnTick()
 {
+   if(instanceLock==INVALID_HANDLE) return;
    datetime now=iTime(Symbol(),PERIOD_M5,0);
    if(now<=0 || now<=lastBar) return;
    Bar d[],h[],m[];

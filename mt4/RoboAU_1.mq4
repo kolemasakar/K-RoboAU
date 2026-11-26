@@ -6,7 +6,7 @@ input bool EnableTrading=false;
 input int MagicNumber=710001;
 input int MaxSlippagePoints=0;
 input double TradeRiskPercent=5.0;
-input double DailyRiskPercent=10.0;
+input double DailyRiskPercent=2.0;
 input double AggregateRiskPercent=10.0;
 input double MaximumStopDistance=50.0;
 // Owner-configured broker server wall-clock times, HH:MM.

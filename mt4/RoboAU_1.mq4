@@ -11,7 +11,7 @@ input double AggregateRiskPercent=10.0;
 input double MaximumStopDistance=50.0;
 // Owner-configured broker server wall-clock times, HH:MM.
 input string FridayCloseTime="21:15";
-input string MondayOpenTime="00:00";
+input string MondayOpenTime="03:00";
 int fridayCloseMinutes=-1, mondayOpenMinutes=-1;
 bool ParseClock(const string value,int &minutes)
 {

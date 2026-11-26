@@ -1,5 +1,5 @@
 #property strict
-#property version "0.940"
+#property version "0.950"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -9,10 +9,25 @@ input double TradeRiskPercent=5.0;
 input double DailyRiskPercent=10.0;
 input double AggregateRiskPercent=10.0;
 input double MaximumStopDistance=50.0;
-// Provisional broker server schedule, inferred from archived M5 data.
-input int FridaySessionCloseHour=23;
-input int FridaySessionCloseMinute=45;
-input int WeekendCloseLeadMinutes=5;
+// Owner-configured broker server wall-clock times, HH:MM.
+input string FridayCloseTime="21:15";
+input string MondayOpenTime="00:00";
+int fridayCloseMinutes=-1, mondayOpenMinutes=-1;
+bool ParseClock(const string value,int &minutes)
+{
+   if(StringLen(value)!=5 || StringGetCharacter(value,2)!=58) return false;
+   for(int i=0;i<5;i++)
+   {
+      if(i==2) continue;
+      ushort c=StringGetCharacter(value,i);
+      if(c<48 || c>57) return false;
+   }
+   int h=(int)StringToInteger(StringSubstr(value,0,2));
+   int m=(int)StringToInteger(StringSubstr(value,3,2));
+   if(h>23 || m>59) return false;
+   minutes=h*60+m;
+   return true;
+}
 // Source-level release lock. Removed only after acceptance.
 const bool ExecutionReleaseAccepted=false;
 
@@ -541,7 +556,7 @@ void ExportClosedHistory()
 int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
-   if(TradeRiskPercent<=0 || TradeRiskPercent>5 || DailyRiskPercent<=0 || DailyRiskPercent>10 || AggregateRiskPercent<=0 || AggregateRiskPercent>10 || MaximumStopDistance<=0 || MaximumStopDistance>50 || FridaySessionCloseHour<0 || FridaySessionCloseHour>23 || FridaySessionCloseMinute<0 || FridaySessionCloseMinute>59 || WeekendCloseLeadMinutes<5 || WeekendCloseLeadMinutes>60 || FridaySessionCloseHour*60+FridaySessionCloseMinute<WeekendCloseLeadMinutes) return INIT_PARAMETERS_INCORRECT;
+   if(TradeRiskPercent<=0 || TradeRiskPercent>5 || DailyRiskPercent<=0 || DailyRiskPercent>10 || AggregateRiskPercent<=0 || AggregateRiskPercent>10 || MaximumStopDistance<=0 || MaximumStopDistance>50 || !ParseClock(FridayCloseTime,fridayCloseMinutes) || !ParseClock(MondayOpenTime,mondayOpenMinutes)) return INIT_PARAMETERS_INCORRECT;
    // Hold an exclusive file handle for the full EA lifetime.
    // Terminal/tester sandboxes are separate. Common folder coordinates terminals.
    instanceLock=FileOpen(JournalName()+".instance.lock",
@@ -549,7 +564,7 @@ int OnInit()
    if(instanceLock==INVALID_HANDLE)
    {Print("INSTANCE_LOCK_FAILED ",GetLastError());return INIT_FAILED;}
    lastBar=iTime(Symbol(),PERIOD_M5,0);
-   Print("RoboAU 1 release locked; recovery marker=",RecoveryBlocked());
+   Print("RoboAU 1 release locked; Friday close=",FridayCloseTime," Monday open=",MondayOpenTime," recovery marker=",RecoveryBlocked());
    ReconcileBrokerState();
    if(RecoveryBlocked()) Print("RECONCILIATION_REQUIRED: inspect broker orders and journal before release.");
    return INIT_SUCCEEDED;
@@ -564,9 +579,10 @@ bool WeekendEntryBlocked(const datetime now)
 {
    int day=TimeDayOfWeek(now);
    if(day==6 || day==0) return true;
-   if(day!=5) return false;
-   return TimeHour(now)*60+TimeMinute(now)>=
-          FridaySessionCloseHour*60+FridaySessionCloseMinute-WeekendCloseLeadMinutes;
+   int minute=TimeHour(now)*60+TimeMinute(now);
+   if(day==5) return minute>=fridayCloseMinutes;
+   if(day==1) return minute<mondayOpenMinutes;
+   return false;
 }
 void ManageWeekendClose()
 {
@@ -592,7 +608,13 @@ void ManageWeekendClose()
 void OnTick()
 {
    if(instanceLock==INVALID_HANDLE) return;
-   if(WeekendEntryBlocked(TimeCurrent())) {ManageWeekendClose();return;}
+   if(WeekendEntryBlocked(TimeCurrent()))
+   {
+      ManageWeekendClose();
+      // Do not evaluate a stale M5 signal after the weekend block.
+      lastBar=iTime(Symbol(),PERIOD_M5,0);
+      return;
+   }
    datetime now=iTime(Symbol(),PERIOD_M5,0);
    if(now<=0 || now<=lastBar) return;
    Bar d[],h[],m[];

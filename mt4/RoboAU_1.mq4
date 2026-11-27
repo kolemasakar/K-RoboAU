@@ -1,5 +1,5 @@
 #property strict
-#property version "0.950"
+#property version "0.960"
 #property description "RoboAU 1 execution candidate; release locked"
 input bool AllowLiveTrading=false;
 input bool EnableTrading=false;
@@ -12,6 +12,30 @@ input double MaximumStopDistance=50.0;
 // Owner-configured broker server wall-clock times, HH:MM.
 input string FridayCloseTime="21:15";
 input string MondayOpenTime="03:00";
+// Optional early-close interval, broker clock; both empty disables it.
+input string SpecialCloseFrom=""; // YYYY.MM.DD HH:MM
+input string SpecialCloseUntil=""; // YYYY.MM.DD HH:MM
+datetime specialFrom=0,specialUntil=0;
+bool reconnectNeeded=true, reconciliationOK=false;
+int StateFlags(){return IsTesting()?0:FILE_COMMON;}
+string ScopeName="";
+string CloseDebtFile(){return JournalName()+".close_pending";}
+bool CloseDebt(){return FileIsExist(CloseDebtFile(),StateFlags());}
+bool SetCloseDebt()
+{
+   if(CloseDebt()) return true;
+   int f=FileOpen(CloseDebtFile(),FILE_WRITE|FILE_TXT|FILE_ANSI|StateFlags());
+   if(f==INVALID_HANDLE) return false;
+   uint n=FileWriteString(f,"CLOSE_PENDING\r\n");FileFlush(f);FileClose(f);
+   return n>0 && CloseDebt();
+}
+bool ClearCloseDebt(){return !CloseDebt() || FileDelete(CloseDebtFile(),StateFlags());}
+bool ParseSpecial(const string value,datetime &out)
+{
+   if(StringLen(value)!=16) return false;
+   out=StringToTime(value);
+   return out>0 && TimeToString(out,TIME_DATE|TIME_MINUTES)==value;
+}
 int fridayCloseMinutes=-1, mondayOpenMinutes=-1;
 bool ParseClock(const string value,int &minutes)
 {
@@ -232,6 +256,7 @@ string lastSetup="";
 // No FILE_SHARE_WRITE: simultaneous instances fail closed.
 string JournalName()
 {
+   if(ScopeName!="") return ScopeName;
    string server=AccountServer();
    StringReplace(server,"/","_"); StringReplace(server,"\\","_");
    StringReplace(server,":","_"); StringReplace(server,"*","_");
@@ -243,7 +268,7 @@ string JournalName()
 }
 bool ReserveSignal(const string key,const Setup &s)
 {
-   int f=FileOpen(JournalName(),FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI,';');
+   int f=FileOpen(JournalName(),FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|StateFlags(),';');
    if(f==INVALID_HANDLE){Print("JOURNAL_OPEN_FAILED ",GetLastError());return false;}
    while(!FileIsEnding(f))
    {
@@ -341,11 +366,11 @@ bool BrokerPlan(const Setup &s,TradePlan &p,string &reason)
 // Persistent fail-closed marker: retained across restart after any uncertain
 // submission or failed verification. Never automatically clear it.
 string RecoveryFile(){return JournalName()+".recovery";}
-bool RecoveryBlocked(){return FileIsExist(RecoveryFile());}
+bool RecoveryBlocked(){return FileIsExist(RecoveryFile(),StateFlags());}
 bool BeginRecovery(const string key)
 {
    if(RecoveryBlocked()) return false;
-   int f=FileOpen(RecoveryFile(),FILE_WRITE|FILE_TXT|FILE_ANSI);
+   int f=FileOpen(RecoveryFile(),FILE_WRITE|FILE_TXT|FILE_ANSI|StateFlags());
    if(f==INVALID_HANDLE) return false;
    uint n=FileWriteString(f,key+"\r\n");
    FileFlush(f);FileClose(f);
@@ -354,7 +379,7 @@ bool BeginRecovery(const string key)
 // Read-only reconciliation: report known broker positions and protection
 // after restart. Unknown submissions remain locked; absence of an order
 // in the locally loaded history is not proof of non-execution.
-void ReconcileBrokerState()
+bool ReconcileBrokerState()
 {
    int active=0,history=0,invalid=0,missing=0;
    for(int i=0;i<OrdersTotal();i++)
@@ -369,7 +394,7 @@ void ReconcileBrokerState()
       double risk=dir*(entry-sl);
       if(dir==0 || sl<=0 || tp<=0 || risk<=0 ||
          MathAbs(tp-(entry+dir*3.0*risk))>Point*0.51) invalid++;
-      if(!FileIsExist(JournalName()+".fill_"+IntegerToString(OrderTicket())+".csv")) missing++;
+      if(!FileIsExist(JournalName()+".fill_"+IntegerToString(OrderTicket())+".csv",StateFlags())) missing++;
       Print("RECOVERY_OPEN ticket=",OrderTicket()," type=",type,
             " lots=",OrderLots()," SL=",sl," TP=",tp);
    }
@@ -384,10 +409,11 @@ void ReconcileBrokerState()
          " invalid=",invalid," missing_fill=",missing," marker=",RecoveryBlocked());
    if((invalid>0 || missing>0) && !RecoveryBlocked())
       BeginRecovery("RESTART_BROKER_STATE_UNVERIFIED");
+   return invalid==0 && missing==0;
 }
 bool ExecutionAllowed()
 {
-   if(RecoveryBlocked()) return false;
+   if(RecoveryBlocked() || CloseDebt() || !reconciliationOK || reconnectNeeded || (!IsTesting() && !IsConnected())) return false;
    if(!EnableTrading || !AccountModeAllowed()) return false;
    if(IsTesting()) return true;
    return ExecutionReleaseAccepted && IsTradeAllowed();
@@ -412,7 +438,7 @@ bool SaveFill(const int ticket,const string key,const double requested,
               const int direction)
 {
    string name=FillFile(ticket);
-   if(FileIsExist(name)) return false;
+   if(FileIsExist(name,StateFlags())) return false;
    int f=FileOpen(name,FILE_WRITE|FILE_CSV|FILE_ANSI,';');
    if(f==INVALID_HANDLE) return false;
    uint n=FileWrite(f,key,ticket,DoubleToString(requested,Digits),
@@ -492,7 +518,7 @@ bool DispatchCandidate(const string key,const Setup &s)
    {EventLog(key,"RECONCILIATION_REQUIRED","PROTECTION_VERIFY");return false;}
    EventLog(key,"OPENED","ticket="+IntegerToString(ticket)+
             " fill="+DoubleToString(fill,Digits)+" tp="+DoubleToString(tp,Digits));
-   if(!FileDelete(RecoveryFile()))
+   if(!FileDelete(RecoveryFile(),StateFlags()))
    {EventLog(key,"RECONCILIATION_REQUIRED","MARKER_DELETE_FAILED");return false;}
    return true;
 }
@@ -557,6 +583,9 @@ int OnInit()
 {
    if(Symbol()!="XAUUSD" || Period()!=PERIOD_M5) return INIT_FAILED;
    if(TradeRiskPercent<=0 || TradeRiskPercent>5 || DailyRiskPercent<=0 || DailyRiskPercent>10 || AggregateRiskPercent<=0 || AggregateRiskPercent>10 || MaximumStopDistance<=0 || MaximumStopDistance>50 || !ParseClock(FridayCloseTime,fridayCloseMinutes) || !ParseClock(MondayOpenTime,mondayOpenMinutes)) return INIT_PARAMETERS_INCORRECT;
+   if((SpecialCloseFrom=="")!=(SpecialCloseUntil=="")) return INIT_PARAMETERS_INCORRECT;
+   if(SpecialCloseFrom!="" && (!ParseSpecial(SpecialCloseFrom,specialFrom) || !ParseSpecial(SpecialCloseUntil,specialUntil) || specialUntil<=specialFrom)) return INIT_PARAMETERS_INCORRECT;
+   ScopeName=JournalName();
    // Hold an exclusive file handle for the full EA lifetime.
    // Terminal/tester sandboxes are separate. Common folder coordinates terminals.
    instanceLock=FileOpen(JournalName()+".instance.lock",
@@ -565,18 +594,22 @@ int OnInit()
    {Print("INSTANCE_LOCK_FAILED ",GetLastError());return INIT_FAILED;}
    lastBar=iTime(Symbol(),PERIOD_M5,0);
    Print("RoboAU 1 release locked; Friday close=",FridayCloseTime," Monday open=",MondayOpenTime," recovery marker=",RecoveryBlocked());
-   ReconcileBrokerState();
+   reconnectNeeded=!IsTesting() && !IsConnected();
+   reconciliationOK=!reconnectNeeded && ReconcileBrokerState();
+   if(!IsTesting() && !EventSetTimer(2)){FileClose(instanceLock);instanceLock=INVALID_HANDLE;return INIT_FAILED;}
    if(RecoveryBlocked()) Print("RECONCILIATION_REQUIRED: inspect broker orders and journal before release.");
    return INIT_SUCCEEDED;
 }
 void OnDeinit(const int reason)
 {
-   if(instanceLock!=INVALID_HANDLE){FileClose(instanceLock);instanceLock=INVALID_HANDLE;}
+   EventKillTimer();
+   if(instanceLock!=INVALID_HANDLE){if(IsTesting() || IsConnected()) ExportClosedHistory();FileClose(instanceLock);instanceLock=INVALID_HANDLE;}
 }
 // Friday cutoff is in broker server time. No per-trade age limit.
 // Actual holiday exceptions require a separately verified session schedule.
 bool WeekendEntryBlocked(const datetime now)
 {
+   if(specialFrom>0 && now>=specialFrom && now<specialUntil) return true;
    int day=TimeDayOfWeek(now);
    if(day==6 || day==0) return true;
    int minute=TimeHour(now)*60+TimeMinute(now);
@@ -584,12 +617,41 @@ bool WeekendEntryBlocked(const datetime now)
    if(day==1) return minute<mondayOpenMinutes;
    return false;
 }
+bool OwnExposure()
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_TRADES)) return true;
+      if(OrderSymbol()==Symbol() && OrderMagicNumber()==MagicNumber) return true;
+   }
+   return false;
+}
+// Detect missed cutoff even if no tick arrived during the blocked interval.
+bool PastCutoff(const datetime opened,const datetime now)
+{
+   if(specialFrom>0 && opened<specialUntil && now>=specialFrom) return true;
+   datetime midnight=StringToTime(TimeToString(opened,TIME_DATE));
+   int days=(5-TimeDayOfWeek(opened)+7)%7;
+   datetime cutoff=midnight+days*86400+fridayCloseMinutes*60;
+   return now>=cutoff && opened<=cutoff;
+}
+bool OverdueExposure(const datetime now)
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      if(!OrderSelect(i,SELECT_BY_POS,MODE_TRADES)) return true;
+      if(OrderSymbol()==Symbol() && OrderMagicNumber()==MagicNumber && PastCutoff(OrderOpenTime(),now)) return true;
+   }
+   return false;
+}
 void ManageWeekendClose()
 {
    // Do not let a recovery marker prevent reducing known EA exposure.
    // The release lock and account gate still apply to every broker mutation.
    if(!EnableTrading || !AccountModeAllowed() ||
-      (!IsTesting() && (!ExecutionReleaseAccepted || !IsTradeAllowed()))) return;
+      (!IsTesting() && (!ExecutionReleaseAccepted || !IsTradeAllowed() || !IsConnected()))) return;
+   if(!OwnExposure()){ClearCloseDebt();return;}
+   if(!SetCloseDebt()){Print("CLOSE_DEBT_WRITE_FAILED");reconciliationOK=false;}
    for(int i=OrdersTotal()-1;i>=0;i--)
    {
       if(!OrderSelect(i,SELECT_BY_POS,MODE_TRADES)) continue;
@@ -604,17 +666,32 @@ void ManageWeekendClose()
          EventLog(IntegerToString(ticket),"WEEKEND_CLOSE_FAILED",IntegerToString(GetLastError()));
       else EventLog(IntegerToString(ticket),"WEEKEND_CLOSED","MARKET");
    }
+   if(!OwnExposure() && !ClearCloseDebt()) Print("CLOSE_DEBT_CLEAR_FAILED");
+}
+void OnTimer()
+{
+   if(!IsConnected()){reconnectNeeded=true;reconciliationOK=false;}
+   // Reconciliation and dispatch wait for a fresh symbol tick.
 }
 void OnTick()
 {
    if(instanceLock==INVALID_HANDLE) return;
-   if(WeekendEntryBlocked(TimeCurrent()))
+   if(!IsTesting() && !IsConnected()){reconnectNeeded=true;reconciliationOK=false;return;}
+   if(reconnectNeeded || !reconciliationOK)
+   {
+      reconciliationOK=ReconcileBrokerState();
+      reconnectNeeded=false;
+      lastBar=iTime(Symbol(),PERIOD_M5,0);
+      if(!reconciliationOK) Print("RECONCILIATION_BLOCKED");
+   }
+   if(WeekendEntryBlocked(TimeCurrent()) || CloseDebt() || OverdueExposure(TimeCurrent()))
    {
       ManageWeekendClose();
       // Do not evaluate a stale M5 signal after the weekend block.
       lastBar=iTime(Symbol(),PERIOD_M5,0);
       return;
    }
+   if(!reconciliationOK) return;
    datetime now=iTime(Symbol(),PERIOD_M5,0);
    if(now<=0 || now<=lastBar) return;
    Bar d[],h[],m[];
